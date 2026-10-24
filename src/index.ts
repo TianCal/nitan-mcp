@@ -14,7 +14,8 @@ if (majorVersion < 18) {
 
 import { readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -48,6 +49,44 @@ import { registerAllTools } from "./tools/registry.js";
 import { SiteState, type AuthOverride } from "./site/state.js";
 
 const DEFAULT_TIMEOUT_MS = 15000;
+const MAX_HTTP_BODY_BYTES = 1024 * 1024;
+
+class RequestBodyTooLargeError extends Error {
+  constructor() {
+    super(`Request body exceeds ${MAX_HTTP_BODY_BYTES} bytes`);
+  }
+}
+
+function readRequestBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_HTTP_BODY_BYTES) {
+        req.destroy();
+        reject(new RequestBodyTooLargeError());
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
+// Accepts `Authorization: Bearer <token>` or `?token=<token>` (for opening /auth in a browser).
+function isAuthorizedRequest(req: IncomingMessage, url: URL, token: string): boolean {
+  const header = req.headers.authorization || "";
+  const presented = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : url.searchParams.get("token") || "";
+  const a = Buffer.from(presented);
+  const b = Buffer.from(token);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function isLoopbackHost(host: string): boolean {
+  return host === "localhost" || host === "::1" || host.startsWith("127.");
+}
 
 // CLI config schema
 const ProfileSchema = z
@@ -80,9 +119,11 @@ const ProfileSchema = z
       .positive()
       .optional()
       .default(50000)
-      .describe("Maximum number of characters to include when returning post content (set via --max-read-length)"),
+      .describe("Maximum number of characters of post content returned by one discourse_read_topic call; also caps each single post (set via --max-read-length)"),
     transport: z.enum(["stdio", "http"]).optional().default("stdio").describe("Transport type: stdio (default) or http"),
     port: z.number().int().positive().optional().default(3000).describe("Port to listen on when using HTTP transport"),
+    host: z.string().optional().default("127.0.0.1").describe("Interface to bind when using HTTP transport (default 127.0.0.1; use 0.0.0.0 for Docker/LAN together with --http-token)"),
+    http_token: z.string().min(16).optional().describe("Bearer token required on HTTP transport endpoints except /health (set via --http-token or NITAN_HTTP_TOKEN)"),
     use_cloudscraper: z.boolean().optional().describe("(Deprecated: use bypass_method instead) Use Python cloudscraper to bypass Cloudflare"),
     bypass_method: z.enum(["cloudscraper", "curl_cffi", "both"]).optional().default("both").describe("Cloudflare bypass method: 'cloudscraper', 'curl_cffi', or 'both' (default - tries cloudscraper with curl_cffi fallback)"),
     python_path: z.string().optional().default(getDefaultPythonPath()).describe("Path to Python executable for bypass methods (defaults to local .venv python when available)"),
@@ -216,6 +257,8 @@ function mergeConfig(profile: Partial<Profile>, flags: Record<string, unknown>):
     max_read_length: (((flags.max_read_length ?? flags["max-read-length"]) as number | undefined) ?? profile.max_read_length ?? 50000) as number,
     transport: ((flags.transport as "stdio" | "http" | undefined) ?? profile.transport ?? "stdio") as "stdio" | "http",
     port: ((flags.port as number | undefined) ?? profile.port ?? 3000) as number,
+    host: ((flags.host as string | undefined) ?? profile.host ?? "127.0.0.1") as string,
+    http_token: (((flags.http_token ?? flags["http-token"]) as string | undefined) ?? process.env.NITAN_HTTP_TOKEN ?? profile.http_token) as string | undefined,
     use_cloudscraper: (((flags.use_cloudscraper ?? flags["use-cloudscraper"]) as boolean | undefined) ?? profile.use_cloudscraper) as boolean | undefined,
     bypass_method: (((flags.bypass_method ?? flags["bypass-method"]) as "cloudscraper" | "curl_cffi" | "both" | undefined) ?? profile.bypass_method ?? "both") as "cloudscraper" | "curl_cffi" | "both",
     python_path: (((flags.python_path ?? flags["python-path"]) as string | undefined) ?? profile.python_path ?? getDefaultPythonPath()) as string,
@@ -658,6 +701,13 @@ Options:
         return;
       }
 
+      // Everything below exposes the logged-in forum session, so require the token when one is set.
+      if (config.http_token && !isAuthorizedRequest(req, parsedUrl, config.http_token)) {
+        res.writeHead(401, { "Content-Type": "application/json", "WWW-Authenticate": "Bearer" });
+        res.end(JSON.stringify({ error: "Unauthorized" }));
+        return;
+      }
+
       // Auth page endpoint
       if (req.method === "GET" && parsedUrl.pathname === "/auth") {
         const authUrl = buildPendingAuthUrl();
@@ -717,7 +767,7 @@ Options:
           e.preventDefault();
           const payload = document.getElementById("payload").value.trim();
           if (!payload) return;
-          const res = await fetch("/auth/callback", {
+          const res = await fetch("/auth/callback" + location.search, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ payload })
@@ -732,7 +782,7 @@ Options:
       if (logoutBtn) {
         logoutBtn.onclick = async () => {
           if (!confirm("Logout from ${config.site}?")) return;
-          const res = await fetch("/auth/callback", { method: "DELETE" });
+          const res = await fetch("/auth/callback" + location.search, { method: "DELETE" });
           const data = await res.json();
           alert(data.message);
           location.reload();
@@ -789,17 +839,16 @@ Options:
         if (req.method === "GET") {
           await handlePayload(parsedUrl.searchParams.get("payload"));
         } else {
-          let body = "";
-          req.on("data", (chunk) => { body += chunk; });
-          req.on("end", async () => {
-            try {
-              const parsed = JSON.parse(body);
-              await handlePayload(parsed.payload);
-            } catch {
-              res.writeHead(400, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ status: "error", message: "Invalid JSON body" }));
-            }
-          });
+          let parsed: any;
+          try {
+            parsed = JSON.parse(await readRequestBody(req));
+          } catch (e: any) {
+            const tooLarge = e instanceof RequestBodyTooLargeError;
+            res.writeHead(tooLarge ? 413 : 400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ status: "error", message: tooLarge ? e.message : "Invalid JSON body" }));
+            return;
+          }
+          await handlePayload(parsed?.payload);
         }
         return;
       }
@@ -811,7 +860,7 @@ Options:
           const profile = JSON.parse(profileTxt);
           if (profile.auth_pairs && Array.isArray(profile.auth_pairs)) {
             profile.auth_pairs = profile.auth_pairs.filter((p: any) => p.site !== config.site);
-            await writeFile(resolvedProfilePath, JSON.stringify(profile, null, 2), "utf8");
+            await writeFile(resolvedProfilePath, JSON.stringify(profile, null, 2), { encoding: "utf8", mode: 0o600 });
           }
           const keyPair = generateKeyPair();
           const nonce = Date.now().toString();
@@ -831,22 +880,18 @@ Options:
 
       // MCP endpoint - handle via StreamableHTTPServerTransport
       if (parsedUrl.pathname === "/mcp" || parsedUrl.pathname === "/") {
-        let body = "";
-        req.on("data", (chunk) => {
-          body += chunk;
-        });
-        req.on("end", async () => {
-          try {
-            const parsedBody = body ? JSON.parse(body) : undefined;
-            await transport.handleRequest(req, res, parsedBody);
-          } catch (error) {
-            logger.error(`Request handling error: ${error}`);
-            if (!res.headersSent) {
-              res.writeHead(500, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ error: "Internal server error" }));
-            }
+        try {
+          const body = await readRequestBody(req);
+          const parsedBody = body ? JSON.parse(body) : undefined;
+          await transport.handleRequest(req, res, parsedBody);
+        } catch (error) {
+          const tooLarge = error instanceof RequestBodyTooLargeError;
+          if (!tooLarge) logger.error(`Request handling error: ${error}`);
+          if (!res.headersSent) {
+            res.writeHead(tooLarge ? 413 : 500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: tooLarge ? error.message : "Internal server error" }));
           }
-        });
+        }
         return;
       }
 
@@ -855,8 +900,12 @@ Options:
       res.end(JSON.stringify({ error: "Not found" }));
     });
 
-    httpServer.listen(config.port, () => {
-      logger.info(`HTTP transport listening on port ${config.port}`);
+    if (!config.http_token && !isLoopbackHost(config.host)) {
+      logger.info(`⚠️  HTTP transport is bound to ${config.host} without --http-token; anyone who can reach this port can use your forum session.`);
+    }
+
+    httpServer.listen(config.port, config.host, () => {
+      logger.info(`HTTP transport listening on ${config.host}:${config.port}`);
       logger.info(`Health check available at http://localhost:${config.port}/health`);
       logger.info(`MCP endpoint available at http://localhost:${config.port}/mcp`);
       if (pendingAuthKeys) {

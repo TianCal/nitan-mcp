@@ -68,7 +68,8 @@ You can configure login credentials via:
 - or per-site `auth_pairs` entries with `username` / `password`
 
 ### Browser fallback / Cloudflare strategy
-- Direct request path prefers Python bypass helpers:
+- Direct request path prefers Python bypass helpers, each run as one long-lived worker process
+  (session cookies and connections persist across requests):
   - `cloudscraper`
   - `curl_cffi`
 - When direct paths hit Cloudflare challenge pages, browser fallback can take over.
@@ -81,7 +82,12 @@ Login behavior inside browser fallback:
 - If not, the user may need to complete login manually in the browser.
 
 ### HTTP transport endpoints
-When `--transport http` is used:
+When `--transport http` is used the server binds to `127.0.0.1` by default (`--host` to change).
+With `--http-token <token>` (or `NITAN_HTTP_TOKEN`, at least 16 characters) every endpoint except
+`/health` requires `Authorization: Bearer <token>` or `?token=<token>`; open the auth page as
+`/auth?token=<token>`. Binding to a non-loopback host without a token logs a warning.
+Request bodies are limited to 1 MB.
+
 - `GET /health`
   - returns status, uptime, auth state, and auth page URL
 - `GET /auth`
@@ -111,7 +117,7 @@ The current runtime registers these built-in tools:
 
 Notes:
 - Write tools have been removed from this repo.
-- Some older builtin source files may still exist in `src/tools/builtin`, but if they are not registered in `src/tools/registry.ts`, they are not part of the active runtime surface.
+- Unregistered tools (`read_post`, `get_user`, `filter_topics`, `list_tags`, `list_categories`) have been deleted.
 
 ### Key CLI/config fields that matter now
 Important runtime flags / profile fields:
@@ -119,9 +125,11 @@ Important runtime flags / profile fields:
 - `--auth_pairs <json>`
 - `--transport stdio|http`
 - `--port <number>`
+- `--host <address>` (HTTP transport, default `127.0.0.1`)
+- `--http-token <token>` (HTTP transport bearer token)
 - `--timeout_ms <number>`
 - `--default-search <prefix>`
-- `--max-read-length <number>`
+- `--max-read-length <number>` (total post characters per `discourse_read_topic` call)
 - `--python_path <path>`
 - `--bypass_method cloudscraper|curl_cffi|both`
 - `--browser_fallback_enabled <bool>`
@@ -140,6 +148,8 @@ Delete the current default profile file with:
 - API key generator / resumable flow: `src/user-api-key-generator.ts`
 - Site/auth selection: `src/site/state.ts`
 - HTTP client: `src/http/client.ts`
+- Python bypass worker (long-lived `*_wrapper.py --serve`, newline-delimited JSON): `src/http/python_bypass.ts`
+- Raw topic page parser: `src/util/raw_topic.ts`
 - Browser fallback: `src/http/browser_fallback.ts`
 - Built-in tool registry: `src/tools/registry.ts`
 - Built-in tools: `src/tools/builtin/*`

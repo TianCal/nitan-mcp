@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { generateKeyPairSync, privateDecrypt, constants, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -307,7 +307,9 @@ export async function saveToProfile(
     user_api_client_id: clientId,
   });
 
-  await writeFile(profilePath, JSON.stringify(profile, null, 2), "utf8");
+  // The profile holds the User API key: keep it owner-only, also when the file already existed.
+  await writeFile(profilePath, JSON.stringify(profile, null, 2), { encoding: "utf8", mode: 0o600 });
+  await chmod(profilePath, 0o600).catch(() => undefined);
 }
 
 export async function generateUserApiKey(options: GenerateOptions): Promise<void> {

@@ -5,20 +5,24 @@ This document describes the tools available in this Discourse MCP server, includ
 ## Core Discourse Tools
 
 ### discourse_search
-Search site content with optional sorting.
+Search site content with optional filters and sorting.
 
 **Input:**
 ```json
 {
-  "query": "credit card rewards",
-  "with_private": false,  // Optional: include private messages (requires auth)
-  "max_results": 10       // Optional: 1-50, default 10
+  "query": "credit card rewards",  // Optional if any filter below is given
+  "max_results": 10,               // Optional: 1-50, default 50
+  "order": "latest",               // Optional: relevance (default), likes, latest, views, latest_topic
+  "category": "玩卡",               // Optional: Chinese category name
+  "author": "john_doe",            // Optional
+  "after": "2026-01-01",           // Optional: YYYY-MM-DD
+  "before": "2026-02-01"           // Optional: YYYY-MM-DD
 }
 ```
 
-**Output:**
-- List of matching topics with titles and URLs
-- JSON footer with structured data
+**Output:** JSON array, one entry per topic: `topic_id`, `url`, `title`, `category`, `tags`, `posts_count`,
+and for the first matching post `post_number`, `author`, `posted_at`, `like_count`, `blurb`.
+Calling it with no query and no filter returns a tool error.
 
 ---
 
@@ -29,48 +33,20 @@ Read a topic's metadata and posts. Can optionally filter to show only posts from
 ```json
 {
   "topic_id": 12345,
-  "post_limit": 5,          // Optional: 1-20, default 5
-  "start_post_number": 1,   // Optional: start from specific post
-  "username": "john_doe"    // Optional: filter to posts by this user only
+  "post_limit": 90,          // Optional: 1-500, default 90
+  "start_post_number": 1,    // Optional: start from specific post
+  "username_filter": "john"  // Optional: only posts by this user
 }
 ```
 
 **Output:**
-- Topic title, category, tags
+- Topic title, category name, tags
 - Posts with author, timestamp, and content
 - Canonical topic link
 
----
-
-### discourse_read_post
-Read a single post by ID.
-
-**Input:**
-```json
-{
-  "post_id": 67890
-}
-```
-
-**Output:**
-- Author, timestamp, content
-- Direct link to the post
-
----
-
-### discourse_get_user
-Get user profile information.
-
-**Input:**
-```json
-{
-  "username": "john_doe"
-}
-```
-
-**Output:**
-- Display name, trust level, joined date
-- Short bio and profile link
+Post content returned by one call is capped at `--max-read-length` characters (default 50000).
+When the cap or `post_limit` cuts the topic short, the output ends with
+`Continue with start_post_number=N`.
 
 ---
 
@@ -89,41 +65,6 @@ Get a list of user posts and replies from a Discourse instance, with the most re
 - List of user's recent posts and replies
 - Post content, topic titles, and links
 - Pagination information
-
----
-
-### discourse_filter_topics
-Filter topics with natural language category names and advanced query syntax.
-
-**Input:**
-```json
-{
-  "filter": "status:open order:latest",
-  "categories": ["Chase Credit Cards", "American Express"],  // Optional: natural language names
-  "page": 1,
-  "per_page": 20
-}
-```
-
-**Output:**
-- Paginated topic list with titles and URLs
-- JSON footer with pagination info
-
-See [Query Language Reference](#query-language-reference) below for filter syntax.
-
----
-
-### discourse_list_tags
-List all available tags on the site.
-
-**Input:**
-```json
-{}
-```
-
-**Output:**
-- List of tags with usage counts
-- Notice if tags are disabled on the site
 
 ---
 
@@ -240,36 +181,10 @@ Get recent excellent topics from the forum. An excellent topic is a topic with o
 
 ---
 
-## Enhanced Category Support
+## Category Support
 
-The `discourse_filter_topics` tool now supports natural language category names.
-
-**Category Support:**
-- Accepts natural language category names (e.g., "Chase Credit Cards")
-- Automatically converts to Discourse category slugs
-- Supports multiple categories (OR logic)
-- See CATEGORIES.md for full list
-
-**Example Queries:**
-```json
-// Find open topics in specific categories
-{
-  "filter": "status:open",
-  "categories": ["Chase Credit Cards", "Points and Miles Strategy"]
-}
-
-// Find recent topics with likes
-{
-  "filter": "order:latest likes-min:5",
-  "categories": ["Credit Card Basics"]
-}
-
-// Find topics with specific tags in a category
-{
-  "filter": "tag:sapphire-reserve",
-  "categories": ["Chase Credit Cards"]
-}
-```
+`discourse_search` accepts Chinese category names in its `category` argument (e.g. 玩卡, 旅行, 理财)
+and converts them to category IDs. Topic lists show category names instead of IDs.
 
 ---
 
@@ -328,13 +243,10 @@ These tools require authentication via `--username` and `--password`:
 - `discourse_list_notifications`
 - `discourse_get_user_activity` (for private content)
 
-### Disabled Tools
-The `discourse_list_categories` tool has been **disabled** because:
-1. Category list was too long and not useful in MCP context
-2. Replaced with hardcoded category mapping
-3. Category names are now accepted directly in `discourse_filter_topics`
-
-If you need to see all categories, refer to `src/tools/categories.ts` or use the web interface.
+### Removed Tools
+`discourse_read_post`, `discourse_get_user`, `discourse_filter_topics`, `discourse_list_tags` and
+`discourse_list_categories` were not registered and their sources have been removed.
+For categories, see `src/tools/categories.ts`.
 
 ---
 
@@ -396,55 +308,7 @@ If Python or dependencies are missing, you'll see bilingual error messages (Engl
 
 ---
 
-## Query Language Reference
-
-For `filter_topics`, you can use these query tokens:
-
-### Status
-- `status:open` - Open topics
-- `status:closed` - Closed topics
-- `status:archived` - Archived topics
-
-### Sorting
-- `order:latest` - Latest activity
-- `order:views` - Most views
-- `order:likes` - Most likes
-- `order:created` - Creation date
-
-### Dates
-- `created-after:2024-01-01`
-- `created-before:2024-12-31`
-- `activity-after:7` (days ago)
-
-### Engagement
-- `likes-min:5` - Minimum likes
-- `posts-min:10` - Minimum posts
-- `views-min:100` - Minimum views
-
-### Tags
-- `tag:sapphire-reserve`
-- `tags:travel,hotels` (OR)
-- `tags:travel+hotels` (AND)
-
-### Personal (requires auth)
-- `in:bookmarked` - Bookmarked topics
-- `in:watching` - Watching topics
-
-### Categories
-Use the `categories` parameter with natural language names instead of query tokens.
-
----
-
 ## Examples
-
-### Find Popular Recent Topics in Specific Categories
-```json
-{
-  "categories": ["Chase Credit Cards", "American Express"],
-  "filter": "order:latest likes-min:10 posts-min:5",
-  "per_page": 20
-}
-```
 
 ### Get Weekly Top Topics
 ```json

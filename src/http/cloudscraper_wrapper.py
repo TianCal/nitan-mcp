@@ -22,6 +22,12 @@ except ImportError:
         file=sys.stderr,
     )
 
+# Browser-identity headers are left to cloudscraper so they match its TLS cipher profile.
+IDENTITY_HEADERS = {"user-agent", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"}
+
+# Prefix for response lines in --serve mode, so stray stdout output from libraries is ignored.
+RESPONSE_PREFIX = "@@NITAN@@"
+
 # Global scraper instance to maintain session across requests
 _scraper_instance: Optional[cloudscraper.CloudScraper] = None
 _base_url: Optional[str] = None
@@ -238,10 +244,16 @@ def make_request(data: Dict) -> Dict:
 
     try:
         # Make the request
+        # Keep cloudscraper's own User-Agent, which matches the cipher profile it picked.
+        headers = {
+            k: v
+            for k, v in (data.get("headers") or {}).items()
+            if k.lower() not in IDENTITY_HEADERS
+        }
         response = scraper.request(
             method=data["method"],
             url=data["url"],
-            headers=data.get("headers", {}),
+            headers=headers,
             data=data.get("body"),
             timeout=data.get("timeout", 30),
         )
@@ -364,5 +376,25 @@ def main():
         sys.exit(1)
 
 
+def serve():
+    """Persistent mode: one JSON request per stdin line, one prefixed JSON response per stdout line.
+
+    The scraper session (Cloudflare cookies, CSRF token) lives for the whole process.
+    """
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            result = make_request(json.loads(line))
+        except Exception as e:
+            result = {"success": False, "error": str(e), "error_type": type(e).__name__}
+        sys.stdout.write(RESPONSE_PREFIX + json.dumps(result, ensure_ascii=True) + "\n")
+        sys.stdout.flush()
+
+
 if __name__ == "__main__":
-    main()
+    if "--serve" in sys.argv[1:]:
+        serve()
+    else:
+        main()

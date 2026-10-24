@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { RegisterFn } from "../types.js";
-import { getCategoryName } from "../categories.js";
+import { getCategoryName, tagNames } from "../categories.js";
 import { formatTimestamp } from "../../util/timestamp.js";
 
 export const registerListTopTopics: RegisterFn = (server, ctx) => {
@@ -43,7 +43,10 @@ export const registerListTopTopics: RegisterFn = (server, ctx) => {
         const data = (await client.get(endpoint)) as any;
         
         const list = data?.topic_list ?? data;
-        const topics: any[] = Array.isArray(list?.topics) ? list.topics : [];
+        // Pinned topics are announcements, not top content (/hot.json includes them).
+        const topics: any[] = (Array.isArray(list?.topics) ? list.topics : []).filter(
+          (topic: any) => !topic.pinned && !topic.pinned_globally
+        );
         
         // Limit the results
         const limitedTopics = topics.slice(0, limit);
@@ -59,56 +62,6 @@ export const registerListTopTopics: RegisterFn = (server, ctx) => {
           };
         }
         
-        // Map period to readable label
-        const periodLabels: Record<string, string> = {
-          daily: "Today",
-          weekly: "This Week",
-          monthly: "This Month",
-          quarterly: "This Quarter",
-          yearly: "This Year",
-          all: "All Time",
-        };
-        
-        // Format human-readable output
-        const lines: string[] = [];
-        lines.push(`Top Topics - ${periodLabels[period] || period} (showing ${limitedTopics.length} of ${topics.length} total):`);
-        lines.push("");
-        
-        let i = 1;
-        for (const topic of limitedTopics) {
-          const title = topic.title || topic.fancy_title || `Topic ${topic.id}`;
-          const slug = topic.slug || String(topic.id);
-          const url = `${base}/t/${slug}/${topic.id}`;
-          const views = topic.views ?? 0;
-          const posts = topic.posts_count ?? 0;
-          const likes = topic.like_count ?? 0;
-          const score = topic.score ?? 0;
-          
-          lines.push(`${i}. ${title}`);
-          lines.push(`   URL: ${url}`);
-          lines.push(`   Stats: ${views} views, ${posts} posts, ${likes} likes, score: ${score}`);
-          
-          // Add category if available
-          if (topic.category_id) {
-            const categoryName = topic.category_name || getCategoryName(topic.category_id);
-            lines.push(`   Category: ${categoryName}`);
-          }
-          
-          // Add tags if available
-          if (topic.tags && topic.tags.length > 0) {
-            lines.push(`   Tags: ${topic.tags.join(", ")}`);
-          }
-          
-          // Add created date
-          if (topic.created_at) {
-            const createdDate = new Date(topic.created_at).toLocaleDateString();
-            lines.push(`   Created: ${createdDate}`);
-          }
-          
-          lines.push("");
-          i++;
-        }
-        
         // Build a compact JSON output for structured extraction
         const jsonOutput = limitedTopics.map((topic) => ({
           id: topic.id,
@@ -118,7 +71,7 @@ export const registerListTopTopics: RegisterFn = (server, ctx) => {
           posts_count: topic.posts_count ?? 0,
           like_count: topic.like_count ?? 0,
           category: topic.category_id ? (topic.category_name || getCategoryName(topic.category_id)) : undefined,
-          tags: topic.tags || [],
+          tags: tagNames(topic.tags),
           created_at: formatTimestamp(topic.created_at || ""),
         }));
         

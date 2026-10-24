@@ -2,6 +2,9 @@ import { z } from "zod";
 import type { RegisterFn } from "../types.js";
 import { formatTimestamp } from "../../util/timestamp.js";
 
+// Reply notifications include a preview of the reply, not the whole post.
+const REPLY_PREVIEW_CHARS = 2000;
+
 function collectErrorText(error: any): string {
   const parts: string[] = [];
   if (typeof error?.message === "string") parts.push(error.message);
@@ -108,14 +111,14 @@ export const registerListNotifications: RegisterFn = (server, ctx) => {
             try {
               const rawContent = (await client.get(`/raw/${notif.topic_id}/${notif.post_number}`)) as string;
               const key = `${notif.topic_id}/${notif.post_number}`;
-              contentMap.set(key, rawContent.slice(0, maxReadLength));
+              contentMap.set(key, rawContent.slice(0, Math.min(maxReadLength, REPLY_PREVIEW_CHARS)));
             } catch (e) {
               // If fetching content fails, just skip it
             }
           }
         }
         
-        // Map notification types to readable labels
+        // Discourse Notification.types (app/models/notification.rb)
         const notificationTypeLabels: Record<number, string> = {
           1: "mentioned",
           2: "replied",
@@ -123,13 +126,27 @@ export const registerListNotifications: RegisterFn = (server, ctx) => {
           4: "edited",
           5: "liked",
           6: "private_message",
-          9: "replied_to_topic",
+          7: "invited_to_private_message",
+          8: "invitee_accepted",
+          9: "posted",
+          10: "moved_post",
           11: "linked",
           12: "granted_badge",
-          15: "topic_reminder",
-          17: "watching_category_or_tag",
+          13: "invited_to_topic",
+          14: "custom",
+          15: "group_mentioned",
+          16: "group_message_summary",
+          17: "watching_first_post",
+          18: "topic_reminder",
+          19: "liked_consolidated",
+          20: "post_approved",
+          24: "bookmark_reminder",
+          25: "reaction",
+          36: "watching_category_or_tag",
+          37: "new_features",
+          39: "linked_consolidated",
         };
-        
+
         // Build JSON output
         const jsonOutput = notifications.map((notif) => {
           const type = notificationTypeLabels[notif.notification_type] || `type_${notif.notification_type}`;

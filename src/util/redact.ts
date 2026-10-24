@@ -17,3 +17,21 @@ export function redactObject<T>(obj: T): T {
     return obj;
   }
 }
+
+const SENSITIVE_HEADERS = new Set([
+  "api-key",
+  "user-api-key",
+  "authorization",
+  "cookie",
+  "set-cookie",
+  "x-csrf-token",
+]);
+
+// Copy of an HTTP header map that is safe to write to logs.
+export function redactHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers || {})) {
+    out[key] = SENSITIVE_HEADERS.has(key.toLowerCase()) ? "<redacted>" : value;
+  }
+  return out;
+}

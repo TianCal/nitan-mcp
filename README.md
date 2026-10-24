@@ -328,6 +328,10 @@ The server loads the default profile location automatically. No extra path flag 
 
 If an API key exists for the selected site, the server uses that first.
 
+> **Tip:** `@latest` downloads and runs whatever version was published most recently, every time the
+> client starts, with access to your saved API key. To pin a release, use e.g. `@nitansde/mcp@2.1.1`,
+> or point `command`/`args` at a local checkout: `"command": "node", "args": ["/path/to/nitan-mcp/dist/index.js"]`.
+
 #### Delete the current saved API key file
 
 To remove the current default saved API profile file entirely:
@@ -375,6 +379,16 @@ Use optional env `"TIMEZONE": "America/New_York"` if you want a timezone differe
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 ```
 
+
+### HTTP transport
+
+```bash
+node dist/index.js --transport http --port 3000 --http-token "$(openssl rand -hex 24)"
+```
+
+- Binds to `127.0.0.1` by default; pass `--host 0.0.0.0` for Docker/LAN (always together with a token).
+- With `--http-token` (or `NITAN_HTTP_TOKEN`), clients must send `Authorization: Bearer <token>`;
+  open the auth page in a browser as `http://localhost:3000/auth?token=<token>`. `/health` stays open.
 
 ## Original README
 [Discourse MCP](https://github.com/discourse/discourse-mcp/blob/main/README.md)

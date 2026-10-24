@@ -135,3 +135,14 @@ export function getCategoryName(id: number): string {
   const cat = CATEGORIES[id];
   return cat ? cat.name : `Category ${id}`;
 }
+
+/**
+ * Normalize Discourse tags to names. Newer Discourse returns {id, name, slug} objects,
+ * older versions return plain strings.
+ */
+export function tagNames(tags: unknown): string[] {
+  if (!Array.isArray(tags)) return [];
+  return tags
+    .map((t: any) => (typeof t === "string" ? t : t?.name ?? t?.slug))
+    .filter((t): t is string => typeof t === "string" && t.length > 0);
+}

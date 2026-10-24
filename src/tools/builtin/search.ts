@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { RegisterFn } from "../types.js";
-import { getCategoryByName } from "../categories.js";
+import { getCategoryByName, getCategoryName, tagNames } from "../categories.js";
+import { formatTimestamp } from "../../util/timestamp.js";
 
 export const registerSearch: RegisterFn = (server, ctx) => {
   const baseSchema = z.object({
@@ -29,8 +30,12 @@ export const registerSearch: RegisterFn = (server, ctx) => {
     },
     async (args, _extra: any) => {
       // Validate with refined schema
-      const validated = schema.parse(args);
-      const { query = "", max_results = 50, order = "relevance", category, author, after, before } = validated;
+      const validation = schema.safeParse(args);
+      if (!validation.success) {
+        const message = validation.error.issues.map((issue) => issue.message).join("; ");
+        return { content: [{ type: "text", text: `Invalid search arguments: ${message}` }], isError: true };
+      }
+      const { query = "", max_results = 50, order = "relevance", category, author, after, before } = validation.data;
       const { base, client } = ctx.siteState.ensureSelectedSite();
       const q = new URLSearchParams();
       q.set("expanded", "true");
@@ -84,42 +89,32 @@ export const registerSearch: RegisterFn = (server, ctx) => {
         const topics: any[] = data?.topics || [];
         const posts: any[] = data?.posts || [];
 
-        // Create a map of topic_id to post info (blurb and post_number) from posts
-        const topicPostMap = new Map<number, { blurb: string; post_number: number }>();
+        // First matching post per topic (blurb, author, time)
+        const topicPostMap = new Map<number, any>();
         for (const post of posts) {
           if (post.topic_id && post.blurb && !topicPostMap.has(post.topic_id)) {
-            topicPostMap.set(post.topic_id, {
-              blurb: post.blurb,
-              post_number: post.post_number || 1
-            });
+            topicPostMap.set(post.topic_id, post);
           }
         }
 
-        const items = (topics.map((t) => {
-          const postInfo = topicPostMap.get(t.id);
-          return {
-            type: "topic" as const,
-            id: t.id,
+        const jsonOutput = topics.slice(0, max_results).map((t) => {
+          const post = topicPostMap.get(t.id);
+          const postNumber = post ? post.post_number || 1 : undefined;
+          const postNumberSuffix = postNumber ? `/${postNumber}` : "";
+          const result: any = {
+            topic_id: t.id,
+            url: `${base}/t/${t.slug}/${t.id}${postNumberSuffix}`,
             title: t.title,
-            slug: t.slug,
-            blurb: postInfo?.blurb,
-            post_number: postInfo?.post_number,
           };
-        }) as Array<{ type: "topic"; id: number; title: string; slug: string; blurb?: string; post_number?: number }>).slice(0, max_results);
-
-        const jsonOutput = items.map((it) => {
-          const postNumberSuffix = it.post_number ? `/${it.post_number}` : "";
-          const result: any = { 
-            topic_id: it.id, 
-            url: `${base}/t/${it.slug}/${it.id}${postNumberSuffix}`, 
-            title: it.title 
-          };
-          if (it.post_number) {
-            result.post_number = it.post_number;
-          }
-          if (it.blurb) {
-            result.blurb = it.blurb;
-          }
+          if (t.category_id) result.category = getCategoryName(t.category_id);
+          const tags = tagNames(t.tags);
+          if (tags.length) result.tags = tags;
+          if (t.posts_count !== undefined) result.posts_count = t.posts_count;
+          if (postNumber) result.post_number = postNumber;
+          if (post?.username) result.author = post.username;
+          if (post?.created_at) result.posted_at = formatTimestamp(post.created_at);
+          if (post?.like_count !== undefined) result.like_count = post.like_count;
+          if (post?.blurb) result.blurb = post.blurb;
           return result;
         });
         const text = JSON.stringify(jsonOutput, null, 2);

@@ -22,6 +22,21 @@ except ImportError:
     )
     sys.exit(1)
 
+# Impersonate the newest Chrome this curl_cffi build knows ("chrome" alias);
+# older curl_cffi releases without the alias fall back to chrome110.
+try:
+    from curl_cffi.requests import BrowserType
+
+    IMPERSONATE = "chrome" if "chrome" in {b.value for b in BrowserType} else "chrome110"
+except Exception:
+    IMPERSONATE = "chrome110"
+
+# Browser-identity headers are left to curl_cffi so they match the impersonated TLS fingerprint.
+IDENTITY_HEADERS = {"user-agent", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"}
+
+# Prefix for response lines in --serve mode, so stray stdout output from libraries is ignored.
+RESPONSE_PREFIX = "@@NITAN@@"
+
 # Global session instance to maintain state across requests
 _session_instance: Optional[requests.Session] = None
 _base_url: Optional[str] = None
@@ -33,8 +48,7 @@ def get_session(base_url: str) -> requests.Session:
 
     # Create new session if URL changed or doesn't exist
     if _session_instance is None or _base_url != base_url:
-        # Use chrome110 impersonation for better Cloudflare compatibility on datacenter IPs
-        _session_instance = requests.Session(impersonate="chrome110")
+        _session_instance = requests.Session(impersonate=IMPERSONATE)
         _base_url = base_url
 
         # Warm up session with base URL to establish Cloudflare cookies
@@ -296,10 +310,15 @@ def make_request(data: Dict) -> Dict:
     try:
         # Make the request
         print(f"[DEBUG] Making {data['method']} request to {url}", file=sys.stderr)
+        headers = {
+            k: v
+            for k, v in (data.get("headers") or {}).items()
+            if k.lower() not in IDENTITY_HEADERS
+        }
         response = session.request(
             method=data["method"],
             url=url,
-            headers=data.get("headers", {}),
+            headers=headers,
             data=data.get("body"),
             timeout=data.get("timeout", 30),
         )
@@ -414,5 +433,26 @@ def main():
         sys.exit(1)
 
 
+def serve():
+    """Persistent mode: one JSON request per stdin line, one prefixed JSON response per stdout line.
+
+    The session (Cloudflare cookies, CSRF token, connection pool) lives for the whole process.
+    """
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            result = make_request(json.loads(line))
+        except Exception as e:
+            print(f"[ERROR] Unhandled exception: {type(e).__name__}: {e}", file=sys.stderr)
+            result = {"success": False, "error": str(e), "error_type": type(e).__name__}
+        sys.stdout.write(RESPONSE_PREFIX + json.dumps(result, ensure_ascii=True) + "\n")
+        sys.stdout.flush()
+
+
 if __name__ == "__main__":
-    main()
+    if "--serve" in sys.argv[1:]:
+        serve()
+    else:
+        main()
