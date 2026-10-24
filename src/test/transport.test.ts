@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createServer, type AddressInfo } from 'node:net';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -12,8 +13,16 @@ import { getDefaultProfilePath } from '../util/paths.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Ask the OS for an unused port; random picks collided when test files run in parallel.
 async function getFreePort(): Promise<number> {
-  return 3000 + Math.floor(Math.random() * 1000);
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address() as AddressInfo;
+      srv.close(() => resolve(port));
+    });
+  });
 }
 
 async function waitForServer(port: number, maxAttempts = 10): Promise<boolean> {

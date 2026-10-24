@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { createServer, type AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -227,7 +228,13 @@ test('python worker reports missing dependencies when the process exits', async 
 
 test('HTTP transport binds to loopback and enforces --http-token', async () => {
   const indexPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../index.js');
-  const port = 4000 + Math.floor(Math.random() * 1000);
+  const port = await new Promise<number>((resolve) => {
+    const srv = createServer();
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address() as AddressInfo;
+      srv.close(() => resolve(port));
+    });
+  });
   const token = 'test-token-0123456789abcdef';
   const proc = spawn('node', [indexPath, '--transport', 'http', '--port', String(port), '--log_level', 'silent', '--http-token', token], {
     stdio: ['ignore', 'ignore', 'ignore'],
