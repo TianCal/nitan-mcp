@@ -112,6 +112,10 @@ General wizard rules:
 
 Use only the tools exposed by the running server. Do not assume hidden/disabled tools exist.
 
+If the host already has the `nitan` MCP server configured (its `discourse_*` tools are callable directly,
+e.g. in Codex or Claude Code), call those tools and skip the shell wrappers below. Use the wrappers only
+when no such tools are available.
+
 ## Shell wrappers for supported tools
 
 This skill includes `scripts/*.sh` wrappers that match the tools exposed in the default nitan skill runtime (`npx --no-install ${NITAN_MCP_PACKAGE:-nitan-mcp}`).
