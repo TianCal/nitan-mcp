@@ -152,6 +152,47 @@ export class HttpClient {
     return this.request("POST", path, body, { signal });
   }
 
+  /**
+   * Download an image hosted by this site (or one of its subdomains, e.g. the asset CDN).
+   * Other hosts are refused so post content cannot make this machine fetch arbitrary URLs.
+   * Uploads are served without a Cloudflare challenge, so plain fetch is enough.
+   */
+  async fetchImage(url: string, maxBytes: number): Promise<{ data: string; mimeType: string }> {
+    if (!this.isSiteHost(url)) throw new Error(`Refusing to fetch image from another host: ${url}`);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.opts.timeoutMs);
+    try {
+      const res = await fetch(url, { headers: { "User-Agent": this.userAgent, Accept: "image/*" }, signal: controller.signal });
+      if (!res.ok) throw new HttpError(res.status, `HTTP ${res.status} for ${url}`);
+      if (!this.isSiteHost(res.url)) throw new Error(`Image redirected to another host: ${res.url}`);
+
+      const mimeType = (res.headers.get("content-type") || "").split(";")[0].trim();
+      if (!mimeType.startsWith("image/")) throw new Error(`Not an image (${mimeType || "unknown type"}): ${url}`);
+      const declared = Number(res.headers.get("content-length") || 0);
+      if (declared > maxBytes) throw new Error(`Image too large (${declared} bytes): ${url}`);
+
+      const buffer = Buffer.from(await res.arrayBuffer());
+      if (buffer.length > maxBytes) throw new Error(`Image too large (${buffer.length} bytes): ${url}`);
+      return { data: buffer.toString("base64"), mimeType };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private isSiteHost(url: string): boolean {
+    let host: string;
+    try {
+      const u = new URL(url);
+      if (u.protocol !== "https:" && u.protocol !== "http:") return false;
+      host = u.hostname.toLowerCase();
+    } catch {
+      return false;
+    }
+    const siteDomain = this.base.hostname.toLowerCase().replace(/^www\./, "");
+    return host === siteDomain || host.endsWith(`.${siteDomain}`);
+  }
+
   private async request(method: string, path: string, body?: unknown, { signal }: { signal?: AbortSignal } = {}) {
     const url = new URL(path, this.base).toString();
     const headers = this.headers();

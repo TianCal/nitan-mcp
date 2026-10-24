@@ -16,13 +16,17 @@ Search site content with optional filters and sorting.
   "category": "玩卡",               // Optional: Chinese category name
   "author": "john_doe",            // Optional
   "after": "2026-01-01",           // Optional: YYYY-MM-DD
-  "before": "2026-02-01"           // Optional: YYYY-MM-DD
+  "before": "2026-02-01",          // Optional: YYYY-MM-DD
+  "topic_id": 541783               // Optional: search only inside this topic
 }
 ```
 
 **Output:** JSON array, one entry per topic: `topic_id`, `url`, `title`, `category`, `tags`, `posts_count`,
 and for the first matching post `post_number`, `author`, `posted_at`, `like_count`, `blurb`.
 Calling it with no query and no filter returns a tool error.
+
+With `topic_id`, results are the matching posts of that topic instead of topics:
+`post_number`, `url`, `author`, `posted_at`, `like_count`, `blurb`. Combine with `order: "likes"` to rank them.
 
 ---
 
@@ -35,7 +39,9 @@ Read a topic's metadata and posts. Can optionally filter to show only posts from
   "topic_id": 12345,
   "post_limit": 90,          // Optional: 1-500, default 90
   "start_post_number": 1,    // Optional: start from specific post
-  "username_filter": "john"  // Optional: only posts by this user
+  "username_filter": "john",  // Optional: only posts by this user
+  "order": "likes",          // Optional: "default" (thread order) or "likes" (most-liked first, up to 200 posts)
+  "include_images": 3        // Optional: attach up to N images from the returned posts (0-10, default 0)
 }
 ```
 
@@ -46,7 +52,12 @@ Read a topic's metadata and posts. Can optionally filter to show only posts from
 
 Post content returned by one call is capped at `--max-read-length` characters (default 50000).
 When the cap or `post_limit` cuts the topic short, the output ends with
-`Continue with start_post_number=N`.
+`Continue with start_post_number=N`. With `order: "likes"` each post shows its like count and
+`start_post_number` is ignored.
+
+`upload://…` references in post content are rewritten to `https://<site>/uploads/short-url/…` links.
+With `include_images`, the first N of those images (site-hosted only, up to 2 MB each) are returned as
+MCP image content, each preceded by a text block naming its post.
 
 ---
 

@@ -3,12 +3,20 @@ import type { RegisterFn } from "../types.js";
 import { formatTimestamp } from "../../util/timestamp.js";
 import { parseRawPage } from "../../util/raw_topic.js";
 import { getCategoryName, tagNames } from "../categories.js";
+import { extractImageUrls, resolveUploadUrls } from "../../util/uploads.js";
+
+const SEARCH_PAGE_SIZE = 50;
+const MAX_LIKES_SEARCH_PAGES = 4;
+const POSTS_PER_BATCH = 20;
+const MAX_IMAGES = 10;
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 
 interface TopicPost {
   number: number;
   username: string;
   created_at: string;
   content: string;
+  likes?: number;
 }
 
 /**
@@ -21,7 +29,12 @@ class PostCollector {
   // Set when the budget stopped collection; the post that did not fit.
   budgetStoppedAt?: number;
 
-  constructor(private readonly postLimit: number, private readonly budget: number) {}
+  constructor(
+    private readonly postLimit: number,
+    private readonly budget: number,
+    // Applied before measuring, so the budget counts what is actually returned.
+    private readonly transform: (content: string) => string = (c) => c,
+  ) {}
 
   get full(): boolean {
     return this.posts.length >= this.postLimit || this.budgetStoppedAt !== undefined;
@@ -29,6 +42,7 @@ class PostCollector {
 
   add(post: TopicPost): void {
     if (this.full) return;
+    post = { ...post, content: this.transform(post.content) };
     const remaining = this.budget - this.used;
     if (post.content.length > remaining) {
       if (this.posts.length > 0) {
@@ -48,7 +62,18 @@ export const registerReadTopic: RegisterFn = (server, ctx) => {
     topic_id: z.number().int().positive(),
     post_limit: z.number().int().min(1).max(500).optional().describe("Number of posts to fetch (default 90, max 500)"),
     start_post_number: z.number().int().min(1).optional().describe("Start from this post number (default 1, 1-based)"),
-    username_filter: z.string().optional().describe("Filter posts by username (only show posts from this user)")
+    username_filter: z.string().optional().describe("Filter posts by username (only show posts from this user)"),
+    order: z
+      .enum(["default", "likes"])
+      .optional()
+      .describe("default: posts in thread order; likes: most-liked posts first (start_post_number is ignored, at most 200 posts)"),
+    include_images: z
+      .number()
+      .int()
+      .min(0)
+      .max(MAX_IMAGES)
+      .optional()
+      .describe(`Attach up to this many images (screenshots) from the returned posts so they can be viewed (default 0, max ${MAX_IMAGES})`),
   });
 
   server.registerTool(
@@ -57,14 +82,15 @@ export const registerReadTopic: RegisterFn = (server, ctx) => {
       title: "Read Topic",
       description:
         "Read a topic metadata and posts. Can optionally filter to show only posts from a specific user. " +
+        "Use order=likes to read only the most-liked posts of a long thread, and include_images to see screenshots. " +
         "Output is capped by a total character budget; when more posts remain, the result says which start_post_number to use next.",
       inputSchema: schema.shape,
     },
-    async ({ topic_id, post_limit = 90, start_post_number = 1, username_filter }, _extra: any) => {
+    async ({ topic_id, post_limit = 90, start_post_number = 1, username_filter, order = "default", include_images = 0 }, _extra: any) => {
       try {
         const { base, client } = ctx.siteState.ensureSelectedSite();
         const budget = Number.isFinite(ctx.maxReadLength) ? ctx.maxReadLength : 50000;
-        const collector = new PostCollector(post_limit, budget);
+        const collector = new PostCollector(post_limit, budget, (c) => resolveUploadUrls(c, base));
 
         let slug = "";
         let title = `Topic ${topic_id}`;
@@ -80,8 +106,46 @@ export const registerReadTopic: RegisterFn = (server, ctx) => {
           highestPostNumber = data?.highest_post_number || data?.posts_count || 0;
         };
 
-        // If username_filter is provided, use the slower but filterable endpoint
-        if (username_filter) {
+        if (order === "likes") {
+          // In-topic search sorted by likes ranks every post in the thread; then load the raw
+          // content of the winners in batches.
+          applyMeta(await client.get(`/t/${topic_id}.json`));
+
+          let terms = `topic:${topic_id} order:likes`;
+          if (username_filter) terms += ` @${username_filter}`;
+          const ranked: any[] = [];
+          for (let page = 1; page <= MAX_LIKES_SEARCH_PAGES && ranked.length < post_limit; page++) {
+            const params = new URLSearchParams({ q: terms });
+            if (page > 1) params.set("page", String(page));
+            const data = (await client.get(`/search.json?${params.toString()}`)) as any;
+            const hits: any[] = Array.isArray(data?.posts) ? data.posts : [];
+            for (const hit of hits) {
+              if (hit.topic_id === topic_id && !ranked.some((r) => r.id === hit.id)) ranked.push(hit);
+            }
+            if (hits.length < SEARCH_PAGE_SIZE) break;
+          }
+
+          const wanted = ranked.slice(0, post_limit);
+          const rawById = new Map<number, any>();
+          for (let i = 0; i < wanted.length && !collector.full; i += POSTS_PER_BATCH) {
+            const batch = wanted.slice(i, i + POSTS_PER_BATCH);
+            const query = batch.map((p) => `post_ids[]=${p.id}`).join("&");
+            const data = (await client.get(`/t/${topic_id}/posts.json?${query}&include_raw=true`)) as any;
+            for (const p of data?.post_stream?.posts ?? []) rawById.set(p.id, p);
+            for (const hit of batch) {
+              const full = rawById.get(hit.id);
+              collector.add({
+                number: hit.post_number,
+                username: hit.username || full?.username || "",
+                created_at: formatTimestamp(hit.created_at || full?.created_at || ""),
+                content: (full?.raw || full?.cooked || hit.blurb || "").toString(),
+                likes: hit.like_count ?? 0,
+              });
+              if (collector.full) break;
+            }
+          }
+        } else if (username_filter) {
+          // The username filter needs the slower but filterable endpoint
           let current = start_post_number;
           let isFirstRequest = true;
 
@@ -180,25 +244,62 @@ export const registerReadTopic: RegisterFn = (server, ctx) => {
         if (category) lines.push(`Category: ${category}`);
         if (tags.length) lines.push(`Tags: ${tags.join(", ")}`);
         if (username_filter) lines.push(`Filtered by user: @${username_filter}`);
+        if (order === "likes") lines.push("Sorted by likes (most-liked first)");
         lines.push("");
         for (const p of fetchedPosts) {
-          lines.push(`- Post #${p.number} by @${p.username} (${p.created_at})`);
+          const likes = p.likes !== undefined ? ` · ${p.likes} likes` : "";
+          lines.push(`- Post #${p.number} by @${p.username} (${p.created_at})${likes}`);
           lines.push(`  ${p.content}`);
         }
         lines.push("");
 
         const lastNumber = fetchedPosts[fetchedPosts.length - 1]?.number ?? start_post_number - 1;
         const nextStart = collector.budgetStoppedAt ?? lastNumber + 1;
-        if (collector.budgetStoppedAt !== undefined) {
+        if (order === "likes") {
+          if (collector.budgetStoppedAt !== undefined) {
+            lines.push(`[Output limit of ${budget} characters reached after ${fetchedPosts.length} posts. Use a smaller post_limit or read single posts with order=default.]`);
+          }
+        } else if (collector.budgetStoppedAt !== undefined) {
           lines.push(`[Output limit of ${budget} characters reached. Continue with start_post_number=${nextStart}.]`);
         } else if (fetchedPosts.length >= post_limit && highestPostNumber > lastNumber) {
           lines.push(`[More posts available. Continue with start_post_number=${nextStart}.]`);
         }
         lines.push(`Link: ${base}/t/${slug}/${topic_id}`);
-        return { content: [{ type: "text", text: lines.join("\n") }] };
+
+        const content: any[] = [{ type: "text", text: lines.join("\n") }];
+        if (include_images > 0) {
+          content.push(...(await loadImages(client, fetchedPosts, include_images, ctx.logger)));
+        }
+        return { content };
       } catch (e: any) {
         return { content: [{ type: "text", text: `Failed to read topic ${topic_id}: ${e?.message || String(e)}` }], isError: true };
       }
     }
   );
 };
+
+// Fetch the first `limit` images referenced by the posts. Each image is preceded by a text block
+// saying which post it belongs to; failures are reported inline instead of failing the call.
+async function loadImages(client: any, posts: TopicPost[], limit: number, logger: { debug(msg: string): void }) {
+  const refs: Array<{ post: number; url: string }> = [];
+  for (const p of posts) {
+    for (const url of extractImageUrls(p.content)) {
+      if (refs.length >= limit) break;
+      if (!refs.some((r) => r.url === url)) refs.push({ post: p.number, url });
+    }
+    if (refs.length >= limit) break;
+  }
+
+  const blocks: any[] = [];
+  for (const ref of refs) {
+    try {
+      const image = await client.fetchImage(ref.url, MAX_IMAGE_BYTES);
+      blocks.push({ type: "text", text: `Image from post #${ref.post}: ${ref.url}` });
+      blocks.push({ type: "image", data: image.data, mimeType: image.mimeType });
+    } catch (e: any) {
+      logger.debug(`Skipping image ${ref.url}: ${e?.message || String(e)}`);
+      blocks.push({ type: "text", text: `Image from post #${ref.post} could not be loaded (${e?.message || String(e)}): ${ref.url}` });
+    }
+  }
+  return blocks;
+}

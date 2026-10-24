@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { RegisterFn } from "../types.js";
 import { formatTimestamp } from "../../util/timestamp.js";
+import { resolveUploadUrls } from "../../util/uploads.js";
 
 // Reply notifications include a preview of the reply, not the whole post.
 const REPLY_PREVIEW_CHARS = 2000;
@@ -111,7 +112,7 @@ export const registerListNotifications: RegisterFn = (server, ctx) => {
             try {
               const rawContent = (await client.get(`/raw/${notif.topic_id}/${notif.post_number}`)) as string;
               const key = `${notif.topic_id}/${notif.post_number}`;
-              contentMap.set(key, rawContent.slice(0, Math.min(maxReadLength, REPLY_PREVIEW_CHARS)));
+              contentMap.set(key, resolveUploadUrls(rawContent, base).slice(0, Math.min(maxReadLength, REPLY_PREVIEW_CHARS)));
             } catch (e) {
               // If fetching content fails, just skip it
             }

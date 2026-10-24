@@ -12,12 +12,13 @@ export const registerSearch: RegisterFn = (server, ctx) => {
     author: z.string().optional().describe("Filter results by author username (e.g., 'xxxyyy')"),
     after: z.string().optional().describe("Filter results after this date (format: YYYY-MM-DD, e.g., '2025-10-07')"),
     before: z.string().optional().describe("Filter results before this date (format: YYYY-MM-DD, e.g., '2025-10-08')"),
+    topic_id: z.number().int().positive().optional().describe("Search only inside this topic; results are individual posts (e.g. find the replies in a long DP thread that mention a card)"),
   });
   
   const schema = baseSchema.refine(
-    (data) => data.query || data.category || data.author || data.after || data.before,
+    (data) => data.query || data.category || data.author || data.after || data.before || data.topic_id,
     {
-      message: "At least one of query, category, author, after, or before must be provided",
+      message: "At least one of query, category, author, after, before, or topic_id must be provided",
     }
   );
 
@@ -25,7 +26,7 @@ export const registerSearch: RegisterFn = (server, ctx) => {
     "discourse_search",
     {
       title: "Discourse Search",
-      description: "Search site content with optional sorting.",
+      description: "Search site content with optional sorting. Pass topic_id to search the posts of a single topic.",
       inputSchema: baseSchema.shape,
     },
     async (args, _extra: any) => {
@@ -35,7 +36,7 @@ export const registerSearch: RegisterFn = (server, ctx) => {
         const message = validation.error.issues.map((issue) => issue.message).join("; ");
         return { content: [{ type: "text", text: `Invalid search arguments: ${message}` }], isError: true };
       }
-      const { query = "", max_results = 50, order = "relevance", category, author, after, before } = validation.data;
+      const { query = "", max_results = 50, order = "relevance", category, author, after, before, topic_id } = validation.data;
       const { base, client } = ctx.siteState.ensureSelectedSite();
       const q = new URLSearchParams();
       q.set("expanded", "true");
@@ -53,6 +54,10 @@ export const registerSearch: RegisterFn = (server, ctx) => {
         fullQuery = fullQuery ? `${fullQuery} ${query}` : query;
       }
       
+      if (topic_id) {
+        fullQuery = fullQuery ? `${fullQuery} topic:${topic_id}` : `topic:${topic_id}`;
+      }
+
       // Add author filter if provided
       if (author) {
         fullQuery = `${fullQuery} @${author}`;
@@ -88,6 +93,26 @@ export const registerSearch: RegisterFn = (server, ctx) => {
         const data = (await client.get(`/search.json?${q.toString()}`)) as any;
         const topics: any[] = data?.topics || [];
         const posts: any[] = data?.posts || [];
+
+        if (topic_id) {
+          // In-topic search: every matching post is a result.
+          const slug = topics.find((t) => t.id === topic_id)?.slug || "topic";
+          const jsonOutput = posts
+            .filter((p) => p.topic_id === topic_id)
+            .slice(0, max_results)
+            .map((p) => {
+              const result: any = {
+                post_number: p.post_number,
+                url: `${base}/t/${slug}/${topic_id}/${p.post_number}`,
+              };
+              if (p.username) result.author = p.username;
+              if (p.created_at) result.posted_at = formatTimestamp(p.created_at);
+              if (p.like_count !== undefined) result.like_count = p.like_count;
+              if (p.blurb) result.blurb = p.blurb;
+              return result;
+            });
+          return { content: [{ type: "text", text: JSON.stringify(jsonOutput, null, 2) }] };
+        }
 
         // First matching post per topic (blurb, author, time)
         const topicPostMap = new Map<number, any>();

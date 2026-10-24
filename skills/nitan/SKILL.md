@@ -149,12 +149,15 @@ Notes:
 
 - `discourse_search`
   - Use for discovery by keyword/category/author/date.
-  - Common params: `query`, `category`, `author`, `after`, `before`, `max_results`.
+  - Common params: `query`, `category`, `author`, `after`, `before`, `max_results`, `order`.
+  - With `topic_id`, searches only inside that topic and returns matching posts (e.g. the replies of a long DP thread that mention one card).
   - Typical first step before reading full topics.
 
 - `discourse_read_topic`
   - Use for deep reading of a topic by `topic_id`.
-  - Common params: `topic_id`, `post_limit`, `start_post_number`, `username_filter`.
+  - Common params: `topic_id`, `post_limit`, `start_post_number`, `username_filter`, `order`, `include_images`.
+  - For long threads, `order: "likes"` returns the most-liked posts first instead of reading from the start.
+  - `include_images: N` attaches up to N screenshots from the returned posts (offer/approval screenshots are often the actual data point).
 
 - `discourse_get_user_activity`
   - Use to track a specific user's recent posts/replies.
@@ -188,6 +191,7 @@ Notes:
 ## Tool-call workflow guidance
 
 - Prefer this flow for most requests: discover (`discourse_search`) -> read (`discourse_read_topic`) -> summarize/answer.
+- For threads with hundreds of replies, read the top posts (`order: "likes"`) or search inside the topic (`discourse_search` with `topic_id`) rather than paging through everything.
 - For monitoring tasks: use list/ranking/activity tools first, then read specific topics for detail.
 - When a tool returns JSON text, parse it carefully and preserve URLs/topic IDs in your response.
 - If a requested tool is unavailable in the runtime, explain clearly and offer the closest supported path.
